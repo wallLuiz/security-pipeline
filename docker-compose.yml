@@ -1,0 +1,75 @@
+services:
+  # ---------- DOWNLOAD DO REPOSITÓRIO ----------
+  git-clone:
+    image: alpine/git
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      GITHUB_REPO_URL: ${GITHUB_REPO_URL:?Configure GITHUB_REPO_URL no .env}
+    volumes:
+      - ./workspace:/workspace
+    command:
+      - 'rm -rf /workspace/repository && git clone --depth 1 "$$GITHUB_REPO_URL" /workspace/repository'
+  # ---------- FASE 1: SAST ----------
+  semgrep:
+    image: semgrep/semgrep
+    working_dir: /src
+    depends_on:
+      git-clone:
+        condition: service_completed_successfully
+    volumes:
+      - ./workspace/repository:/src:ro
+      - ./reports:/reports
+    command: semgrep scan --config auto --json --output /reports/semgrep.json .
+
+  # ---------- APLICAÇÃO DE TESTE ----------
+  
+  # ---------- LABORATÓRIO LOCAL ----------
+  app:
+    image: bkimminich/juice-shop
+    profiles:
+      - lab
+    ports:
+      - "127.0.0.1:3000:3000"
+  # ---------- FASE 2: DAST - URL EXTERNA ----------
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    user: root
+    environment:
+      APP_TARGET_URL: ${APP_TARGET_URL:?Configure APP_TARGET_URL no .env}
+    volumes:
+      - ./reports:/zap/wrk
+    command: >
+      sh -c "zap-baseline.py
+      -t '$$APP_TARGET_URL'
+      -J zap.json
+      -r zap.html
+      -I"
+  # ---------- FASE 2: DAST - LABORATÓRIO LOCAL ----------
+  zap-lab:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    user: root
+    profiles:
+      - lab
+      - external
+    depends_on:
+      - app
+    volumes:
+      - ./reports:/zap/wrk
+    command: >
+      sh -c "sleep 30 &&
+      zap-baseline.py
+      -t http://app:3000
+      -J zap-lab.json
+      -r zap-lab.html
+      -I"
+ # ---------- ENRIQUECIMENTO COM IA ----------
+  enricher:
+    build: ./enricher
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?Configure DEEPSEEK_API_KEY no .env}
+      MAX_ITEMS: "10"
+      ZAP_REPORT: zap-lab.json
+      OSV_LIMIT: "100"
+    volumes:
+      - ./reports:/reports
+      - ./workspace/repository:/src:ro

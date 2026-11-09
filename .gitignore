@@ -1,0 +1,11 @@
+# Variáveis de ambiente e credenciais
+.env
+
+# Relatórios gerados
+reports/
+
+# Código-alvo da análise
+target/
+
+workspace/
+

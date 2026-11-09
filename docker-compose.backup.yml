@@ -1,0 +1,59 @@
+
+services:
+
+  # ---------- DOWNLOAD DO REPOSITÓRIO ----------
+
+
+  
+
+  git-clone:
+    image: alpine/git
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      GITHUB_REPO_URL: ${GITHUB_REPO_URL:?Configure GITHUB_REPO_URL no .env}
+    volumes:
+      - ./workspace:/workspace
+    command:
+      - 'rm -rf /workspace/repository && git clone --depth 1 "$$GITHUB_REPO_URL" /workspace/repository'
+
+
+
+  # ---------- FASE 1: SAST ----------
+  semgrep:
+    image: semgrep/semgrep
+    working_dir: /src
+    depends_on:
+      git-clone:
+        condition: service_completed_successfully
+    volumes:
+      - ./workspace/repository:/src:ro
+      - ./reports:/reports
+    command: semgrep scan --config auto --json --output /reports/semgrep.json .
+
+  # ---------- APLICAÇÃO DE TESTE ----------
+  app:
+    image: bkimminich/juice-shop
+    expose:
+      - "3000"
+
+  # ---------- FASE 2: DAST ----------
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    user: root
+    depends_on:
+      - app
+    volumes:
+      - ./reports:/zap/wrk
+    command: >
+      sh -c "sleep 30 &&
+      zap-baseline.py -t http://app:3000 -J zap.json -r zap.html -I"
+
+  # ---------- ENRIQUECIMENTO COM IA ----------
+  enricher:
+    build: ./enricher
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - MAX_ITEMS=10
+    volumes:
+      - ./reports:/reports
+      - ./workspace/repository:/src:ro
