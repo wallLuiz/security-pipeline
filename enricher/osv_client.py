@@ -88,61 +88,104 @@ def extrair_dependencias_npm(caminho_lock):
     return dependencias
 
 
-def consultar_dependencias_npm(caminho_lock, limite=100):
+
+def consultar_dependencias_npm(caminho_lock, limite=0, tamanho_lote=100):
     """
-    Consulta as dependências npm no OSV.dev.
-    Retorna os resultados e estatísticas da consulta.
+    Consulta dependências npm no OSV.dev utilizando a Batch API.
+
+    limite=0 significa consultar todas as dependências identificadas.
     """
 
     dependencias = extrair_dependencias_npm(caminho_lock)
 
+    selecionadas = (
+        dependencias[:limite]
+        if limite > 0
+        else dependencias
+    )
+
     resultados = []
     erros = 0
-    consultadas = min(len(dependencias), limite)
+    consultadas = 0
 
     print(f"[OSV] Dependências identificadas: {len(dependencias)}")
+    print(f"[OSV] Dependências selecionadas: {len(selecionadas)}")
 
-    for dependencia in dependencias[:limite]:
+    for inicio in range(0, len(selecionadas), tamanho_lote):
 
-        nome = dependencia["name"]
-        versao = dependencia["version"]
+        lote = selecionadas[inicio:inicio + tamanho_lote]
+
+        consultas = [
+            {
+                "package": {
+                    "name": dependencia["name"],
+                    "ecosystem": "npm"
+                },
+                "version": dependencia["version"]
+            }
+            for dependencia in lote
+        ]
 
         try:
             resposta = requests.post(
-                OSV_API_URL,
-                json={
-                    "version": versao,
-                    "package": {
-                        "name": nome,
-                        "ecosystem": "npm"
-                    }
-                },
-                timeout=TIMEOUT
+                "https://api.osv.dev/v1/querybatch",
+                json={"queries": consultas},
+                timeout=60
             )
 
             resposta.raise_for_status()
-            vulnerabilidades = resposta.json().get("vulns", [])
+            dados = resposta.json()
 
-        except requests.RequestException as erro:
-            print(f"[ERRO OSV] {nome}@{versao}: {erro}")
-            erros += 1
+            respostas = dados.get("results", [])
+
+            if len(respostas) != len(lote):
+                raise ValueError(
+                    "Quantidade de resultados diferente "
+                    "da quantidade de consultas enviadas."
+                )
+
+        except (requests.RequestException, ValueError) as erro:
+            print(f"[ERRO OSV] Falha no lote {inicio // tamanho_lote + 1}: {erro}")
+            erros += len(lote)
             continue
 
-        if vulnerabilidades:
-            resultados.append({
-                **dependencia,
-                "vulnerabilities": vulnerabilidades
-            })
+        consultadas += len(lote)
+
+        for dependencia, resultado in zip(lote, respostas):
+
+            vulnerabilidades = resultado.get("vulns", [])
+
+            if resultado.get("error"):
+                erros += 1
+                consultadas -= 1
+                print(
+                    f"[ERRO OSV] {dependencia['name']}@"
+                    f"{dependencia['version']}: {resultado['error']}"
+                )
+                continue
+
+            if vulnerabilidades:
+                resultados.append({
+                    **dependencia,
+                    "vulnerabilities": vulnerabilidades
+                })
+
+            print(
+                f"[OSV] {dependencia['name']}@{dependencia['version']}: "
+                f"{len(vulnerabilidades)} vulnerabilidade(s)"
+            )
 
         print(
-            f"[OSV] {nome}@{versao}: "
-            f"{len(vulnerabilidades)} vulnerabilidade(s)"
+            f"[OSV] Lote {inicio // tamanho_lote + 1} concluído "
+            f"({len(lote)} dependências)."
         )
 
     return {
         "total_dependencies": len(dependencias),
-        "dependencies_consulted": consultadas - erros,
+        "dependencies_selected": len(selecionadas),
+        "dependencies_consulted": consultadas,
         "dependencies_with_vulnerabilities": len(resultados),
         "vulnerable_dependencies": resultados,
         "errors": erros
     }
+
